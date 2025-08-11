@@ -1,4 +1,4 @@
-name: Persistent VPS with Tailscale
+name: Persistent VPS with Pterodactyl & Tailscale
 
 on:
   schedule:
@@ -17,25 +17,17 @@ jobs:
       - name: Set hostname
         run: sudo hostnamectl set-hostname biralo
 
-      - name: Download previous backup (if exists)
+      - name: Download previous backup (if any)
         uses: actions/download-artifact@v4
         with:
           name: vps-backup
           path: ./backup
         continue-on-error: true
 
-      - name: Confirm backup availability
-        run: |
-          if [ -f ./backup/backup.zip ]; then
-            echo "✅ Backup found"
-          else
-            echo "📭 No previous backup found"
-          fi
-
-      - name: Install tools
+      - name: Install dependencies
         run: |
           sudo apt update
-          sudo apt install -y tmate curl unzip sudo net-tools neofetch zip
+          sudo apt install -y tmate curl unzip sudo net-tools neofetch zip mysql-client
 
       - name: Install Tailscale
         run: curl -fsSL https://tailscale.com/install.sh | sh
@@ -45,6 +37,8 @@ jobs:
           if [ -f ./backup/backup.zip ]; then
             unzip -o ./backup/backup.zip -d /
             echo "✅ Backup restored"
+          else
+            echo "📭 No backup found"
           fi
 
       - name: Restore Tailscale state
@@ -58,17 +52,34 @@ jobs:
             echo "⚠️ No Tailscale state found"
           fi
 
-      - name: Start Tailscale with debug info
+      - name: Start Tailscale
         run: |
-          echo "🔍 Checking state file..."
-          ls -lh /var/lib/tailscale/tailscaled.state && head -c 128 /var/lib/tailscale/tailscaled.state | base64 || echo "Missing or corrupt state"
-
           sudo tailscaled &
           sleep 8
-
           sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname=biralo || echo "Tailscale already up"
 
-      - name: Create user 'biralo'
+      - name: Restore Pterodactyl panel files
+        run: |
+          if [ -d /opt/vps-backup/panel/pterodactyl ]; then
+            sudo cp -r /opt/vps-backup/panel/pterodactyl /var/www/
+            echo "✅ Panel files restored"
+          else
+            echo "⚠️ No panel files found"
+          fi
+
+      - name: Restore Pterodactyl database
+        env:
+          MYSQL_PWD: ${{ secrets.MYSQL_ROOT_PASSWORD }}
+        run: |
+          if [ -f /opt/vps-backup/db/panel.sql ]; then
+            sudo systemctl start mysql || true
+            mysql -u root panel < /opt/vps-backup/db/panel.sql
+            echo "✅ Database restored"
+          else
+            echo "⚠️ No database backup found"
+          fi
+
+      - name: Create user biralo
         run: |
           if ! id -u biralo >/dev/null 2>&1; then
             sudo useradd -m -s /bin/bash biralo
@@ -88,19 +99,30 @@ jobs:
           echo "🔑 tmate SSH session:"
           cat $HOME/.tmate.sock/ssh || echo "No tmate socket"
 
-      - name: Keep session alive & auto-backup every hour
+      - name: Auto backup loop (every hour)
         run: |
-          echo "⏳ Starting background auto-backup loop..."
+          echo "⏳ Starting hourly backup loop..."
           (
             for i in {1..5}; do
-              echo "🕒 Backup hour $i"
-              sudo mkdir -p /opt/vps-backup/data
+              echo "🕒 Hourly backup $i"
+              sudo mkdir -p /opt/vps-backup/data /opt/vps-backup/panel /opt/vps-backup/db
+
+              # Backup Tailscale state
               sudo cp /var/lib/tailscale/tailscaled.state /opt/vps-backup/data/
+
+              # Backup panel files
+              sudo cp -r /var/www/pterodactyl /opt/vps-backup/panel/
+
+              # Backup MySQL database
+              mysqldump -u root panel > /opt/vps-backup/db/panel.sql
+
               sudo chown -R $(whoami):$(whoami) /opt/vps-backup
+
               zip -r "auto-backup-$i.zip" /opt/vps-backup
-              echo "✅ Created auto-backup-$i.zip"
               cp "auto-backup-$i.zip" latest-backup.zip
-              sleep 3600  # Wait 1 hour
+
+              echo "✅ Hourly backup $i done"
+              sleep 3600
             done
           ) &
 
@@ -110,9 +132,14 @@ jobs:
       - name: Final backup before exit
         run: |
           TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-          sudo mkdir -p /opt/vps-backup/data
+          sudo mkdir -p /opt/vps-backup/data /opt/vps-backup/panel /opt/vps-backup/db
+
           sudo cp /var/lib/tailscale/tailscaled.state /opt/vps-backup/data/
+          sudo cp -r /var/www/pterodactyl /opt/vps-backup/panel/
+          mysqldump -u root panel > /opt/vps-backup/db/panel.sql
+
           sudo chown -R $(whoami):$(whoami) /opt/vps-backup
+
           zip -r "backup-${TIMESTAMP}.zip" /opt/vps-backup
           cp "backup-${TIMESTAMP}.zip" latest-backup.zip
           echo "BACKUP_NAME=backup-${TIMESTAMP}.zip" >> $GITHUB_ENV
