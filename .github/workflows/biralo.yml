@@ -2,29 +2,29 @@ name: Auto VPS Backup & Restore Every 5 Minutes
 
 on:
   schedule:
-    - cron: '*/5 * * * *'  # Run every 5 minutes
+    - cron: '*/5 * * * *'  # Every 5 minutes
   workflow_dispatch:
 
 jobs:
   vps-persistent:
     runs-on: ubuntu-latest
-    timeout-minutes: 10  # Keep short because it runs every 5 min
+    timeout-minutes: 10  # Runs frequently, short timeout
 
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Set hostname
+      - name: Set static hostname
         run: sudo hostnamectl set-hostname biralo
 
-      - name: Download backup artifact if exists
+      - name: Download backup artifact if it exists
         uses: actions/download-artifact@v4
         with:
           name: vps-backup
           path: ./backup
         continue-on-error: true
 
-      - name: Install prerequisites
+      - name: Install required packages
         run: |
           sudo apt update
           sudo apt install -y unzip curl sudo zip
@@ -32,12 +32,12 @@ jobs:
       - name: Install Tailscale
         run: curl -fsSL https://tailscale.com/install.sh | sh
 
-      - name: Restore backup files
+      - name: Restore previous backup files (Petrodactyl, tailscale, etc.)
         run: |
           if [ -f ./backup/backup.zip ]; then
             unzip -o ./backup/backup.zip -d /
           else
-            echo "No backup found, starting fresh"
+            echo "No backup found. Starting fresh."
           fi
 
       - name: Restore Tailscale state
@@ -48,13 +48,13 @@ jobs:
             sudo chmod 600 /var/lib/tailscale/tailscaled.state
           fi
 
-      - name: Start tailscaled and connect
+      - name: Start Tailscale with same IP
         run: |
           sudo tailscaled &
           sleep 8
           sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname=biralo || echo "Tailscale already up"
 
-      - name: Create user biralo with sudo if missing
+      - name: Ensure 'biralo' user exists with sudo access
         run: |
           if ! id -u biralo >/dev/null 2>&1; then
             sudo useradd -m -s /bin/bash biralo
@@ -63,20 +63,33 @@ jobs:
             echo "biralo ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/biralo
           fi
 
-      - name: Show Tailscale IP
-        run: tailscale ip -4 || echo "No Tailscale IP"
+      - name: Display Tailscale IP
+        run: tailscale ip -4 || echo "No Tailscale IP available"
 
-      - name: Backup VPS data & Tailscale state and Petrodactyl panel
+      - name: Backup VPS (Petrodactyl + Tailscale state)
         run: |
           sudo mkdir -p /opt/vps-backup/data
+          
+          # Backup Tailscale state
           sudo cp /var/lib/tailscale/tailscaled.state /opt/vps-backup/data/ || echo "No tailscaled.state found"
-          # Make sure to update this path to your real Petrodactyl panel path:
-          mkdir -p /opt/vps-backup/petrodactyl
-          cp -r /home/biralo/petrodactyl/* /opt/vps-backup/petrodactyl/ || echo "No Petrodactyl files found"
+
+          # Backup Petrodactyl panel
+          PETRO_PATH="/home/biralo/petrodactyl"  # Change if your path is different
+          if [ -d "$PETRO_PATH" ]; then
+            mkdir -p /opt/vps-backup/petrodactyl
+            cp -r "$PETRO_PATH"/* /opt/vps-backup/petrodactyl/
+          else
+            echo "Petrodactyl path not found at $PETRO_PATH"
+          fi
+
+          # You can add more folders if needed:
+          # cp -r /etc /opt/vps-backup/etc/
+          # cp -r /var/www /opt/vps-backup/var-www/
+
           sudo chown -R $USER:$USER /opt/vps-backup
           zip -r backup.zip /opt/vps-backup
 
-      - name: Upload backup artifact
+      - name: Upload backup for next run
         uses: actions/upload-artifact@v4
         with:
           name: vps-backup
