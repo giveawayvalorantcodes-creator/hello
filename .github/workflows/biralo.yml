@@ -1,4 +1,4 @@
-name: Continuous Persistent VPS
+name: Persistent VPS with Tailscale
 
 on:
   schedule:
@@ -6,36 +6,36 @@ on:
   workflow_dispatch:
 
 jobs:
-  vps-session:
+  vps:
     runs-on: ubuntu-latest
     timeout-minutes: 350  # Just under 6 hours
 
     steps:
-      - name: Checkout repository
+      - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Set hostname to biralo
+      - name: Set hostname
         run: sudo hostnamectl set-hostname biralo
 
-      - name: Download VPS backup (if available)
+      - name: Download previous backup (if exists)
         uses: actions/download-artifact@v4
         with:
           name: vps-backup
           path: ./backup
         continue-on-error: true
-      - name: Confirm backup download
-        if: failure() || success()
+
+      - name: Confirm backup availability
         run: |
-          if [ -d "./backup" ]; then
-            echo "Backup directory exists, continuing."
+          if [ -f ./backup/backup.zip ]; then
+            echo "✅ Backup found"
           else
-            echo "No backup artifact found, starting fresh."
+            echo "📭 No previous backup found"
           fi
 
-      - name: Install prerequisites
+      - name: Install tools
         run: |
           sudo apt update
-          sudo apt install -y tmate curl unzip sudo net-tools neofetch
+          sudo apt install -y tmate curl unzip sudo net-tools neofetch zip
 
       - name: Install Tailscale
         run: curl -fsSL https://tailscale.com/install.sh | sh
@@ -43,28 +43,32 @@ jobs:
       - name: Restore backup files
         run: |
           if [ -f ./backup/backup.zip ]; then
-            echo "Restoring backup..."
             unzip -o ./backup/backup.zip -d /
-          else
-            echo "No backup found, starting fresh"
+            echo "✅ Backup restored"
           fi
 
       - name: Restore Tailscale state
         run: |
           if [ -f /opt/vps-backup/data/tailscaled.state ]; then
             sudo mkdir -p /var/lib/tailscale
-            sudo cp /opt/vps-backup/data/tailscaled.state /var/lib/tailscale/tailscaled.state
+            sudo cp /opt/vps-backup/data/tailscaled.state /var/lib/tailscale/
             sudo chmod 600 /var/lib/tailscale/tailscaled.state
-            echo "Tailscale state restored."
+            echo "✅ Tailscale state restored"
+          else
+            echo "⚠️ No Tailscale state found"
           fi
 
-      - name: Start Tailscale
+      - name: Start Tailscale with debug info
         run: |
+          echo "🔍 Checking state file..."
+          ls -lh /var/lib/tailscale/tailscaled.state && head -c 128 /var/lib/tailscale/tailscaled.state | base64 || echo "Missing or corrupt state"
+
           sudo tailscaled &
           sleep 8
-          sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname=biralo || echo "Tailscale already running"
 
-      - name: Create user 'biralo' with sudo access
+          sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname=biralo || echo "Tailscale already up"
+
+      - name: Create user 'biralo'
         run: |
           if ! id -u biralo >/dev/null 2>&1; then
             sudo useradd -m -s /bin/bash biralo
@@ -73,35 +77,52 @@ jobs:
             echo "biralo ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/biralo
           fi
 
-      - name: Start tmate session for SSH access
+      - name: Start tmate SSH session
         uses: mxschmitt/action-tmate@v3
 
-      - name: Show Tailscale IP and tmate info
+      - name: Show IP + SSH info
         run: |
-          echo "🔗 Tailscale IP:"
-          tailscale ip -4 || echo "Tailscale IP not found"
+          echo "🌐 Tailscale IP:"
+          tailscale ip -4 || echo "IP not available"
           echo ""
           echo "🔑 tmate SSH session:"
-          cat $HOME/.tmate.sock/ssh
+          cat $HOME/.tmate.sock/ssh || echo "No tmate socket"
 
-      - name: Keep VPS alive for 6 hours
-        run: sleep 21600  # 6 hours
+      - name: Keep session alive & auto-backup every hour
+        run: |
+          echo "⏳ Starting background auto-backup loop..."
+          (
+            for i in {1..5}; do
+              echo "🕒 Backup hour $i"
+              sudo mkdir -p /opt/vps-backup/data
+              sudo cp /var/lib/tailscale/tailscaled.state /opt/vps-backup/data/
+              sudo chown -R $(whoami):$(whoami) /opt/vps-backup
+              zip -r "auto-backup-$i.zip" /opt/vps-backup
+              echo "✅ Created auto-backup-$i.zip"
+              cp "auto-backup-$i.zip" latest-backup.zip
+              sleep 3600  # Wait 1 hour
+            done
+          ) &
 
-      - name: Backup VPS data and Tailscale state
+          echo "🛌 Sleeping for 6 hours..."
+          sleep 21600
+
+      - name: Final backup before exit
         run: |
           TIMESTAMP=$(date +%Y%m%d-%H%M%S)
           sudo mkdir -p /opt/vps-backup/data
           sudo cp /var/lib/tailscale/tailscaled.state /opt/vps-backup/data/
           sudo chown -R $(whoami):$(whoami) /opt/vps-backup
           zip -r "backup-${TIMESTAMP}.zip" /opt/vps-backup
+          cp "backup-${TIMESTAMP}.zip" latest-backup.zip
           echo "BACKUP_NAME=backup-${TIMESTAMP}.zip" >> $GITHUB_ENV
 
-      - name: Upload VPS backup artifact
+      - name: Upload final backup
         uses: actions/upload-artifact@v4
         with:
           name: vps-backup
-          path: ${{ env.BACKUP_NAME }}
+          path: latest-backup.zip
 
-      - name: Clean up local files
+      - name: Cleanup
         run: |
-          rm -rf /opt/vps-backup backup*.zip ./backup
+          rm -rf /opt/vps-backup *.zip ./backup
