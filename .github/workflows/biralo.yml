@@ -23,6 +23,14 @@ jobs:
           name: vps-backup
           path: ./backup
         continue-on-error: true
+      - name: Confirm backup download
+        if: failure() || success()
+        run: |
+          if [ -d "./backup" ]; then
+            echo "Backup directory exists, continuing."
+          else
+            echo "No backup artifact found, starting fresh."
+          fi
 
       - name: Install prerequisites
         run: |
