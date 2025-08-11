@@ -11,13 +11,13 @@ jobs:
     timeout-minutes: 350  # Just under 6 hours
 
     steps:
-      - name: Checkout repo
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Set hostname to biralo
         run: sudo hostnamectl set-hostname biralo
 
-      - name: Download VPS backup (if any)
+      - name: Download VPS backup (if available)
         uses: actions/download-artifact@v4
         with:
           name: vps-backup
@@ -29,13 +29,13 @@ jobs:
           sudo apt update
           sudo apt install -y tmate curl unzip sudo net-tools neofetch
 
-      - name: Install Tailscale official script
-        run: |
-          curl -fsSL https://tailscale.com/install.sh | sh
+      - name: Install Tailscale
+        run: curl -fsSL https://tailscale.com/install.sh | sh
 
       - name: Restore backup files
         run: |
           if [ -f ./backup/backup.zip ]; then
+            echo "Restoring backup..."
             unzip -o ./backup/backup.zip -d /
           else
             echo "No backup found, starting fresh"
@@ -47,19 +47,20 @@ jobs:
             sudo mkdir -p /var/lib/tailscale
             sudo cp /opt/vps-backup/data/tailscaled.state /var/lib/tailscale/tailscaled.state
             sudo chmod 600 /var/lib/tailscale/tailscaled.state
+            echo "Tailscale state restored."
           fi
 
       - name: Start Tailscale
         run: |
           sudo tailscaled &
           sleep 8
-          sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname=biralo || echo "Tailscale already up"
+          sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname=biralo || echo "Tailscale already running"
 
-      - name: Create user biralo with sudo
+      - name: Create user 'biralo' with sudo access
         run: |
           if ! id -u biralo >/dev/null 2>&1; then
             sudo useradd -m -s /bin/bash biralo
-            echo "biralo:biralo" | sudo chpasswd
+            echo "biralo:${{ secrets.BIRALO_PASSWORD }}" | sudo chpasswd
             sudo usermod -aG sudo biralo
             echo "biralo ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/biralo
           fi
@@ -75,18 +76,24 @@ jobs:
           echo "🔑 tmate SSH session:"
           cat $HOME/.tmate.sock/ssh
 
-      - name: Sleep to keep VPS alive
+      - name: Keep VPS alive for 6 hours
         run: sleep 21600  # 6 hours
 
-      - name: Backup VPS data and tailscale state
+      - name: Backup VPS data and Tailscale state
         run: |
+          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
           sudo mkdir -p /opt/vps-backup/data
           sudo cp /var/lib/tailscale/tailscaled.state /opt/vps-backup/data/
-          sudo chown -R $USER:$USER /opt/vps-backup
-          zip -r backup.zip /opt/vps-backup
+          sudo chown -R $(whoami):$(whoami) /opt/vps-backup
+          zip -r "backup-${TIMESTAMP}.zip" /opt/vps-backup
+          echo "BACKUP_NAME=backup-${TIMESTAMP}.zip" >> $GITHUB_ENV
 
       - name: Upload VPS backup artifact
         uses: actions/upload-artifact@v4
         with:
           name: vps-backup
-          path: backup.zip
+          path: ${{ env.BACKUP_NAME }}
+
+      - name: Clean up local files
+        run: |
+          rm -rf /opt/vps-backup backup*.zip ./backup
