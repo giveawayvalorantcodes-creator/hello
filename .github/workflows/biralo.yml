@@ -1,12 +1,12 @@
-name: Persistent VPS Backup and Restore
+name: Persistent VPS Rsync Backup
 
 on:
   schedule:
-    - cron: '*/15 * * * *'   # Every 15 minutes
+    - cron: '*/15 * * * *'  # Every 15 minutes
   workflow_dispatch:
 
 jobs:
-  backup-restore:
+  rsync-backup:
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -18,43 +18,40 @@ jobs:
       MYSQL_PASSWORD: ${{ secrets.PTERO_DB_PASSWORD }}
 
     steps:
-      - name: Checkout repo
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Backup on VPS via SSH
-        uses: appleboy/ssh-action@v0.1.7
-        with:
-          host: ${{ env.VPS_HOST }}
-          username: ${{ env.VPS_USER }}
-          key: ${{ env.VPS_SSH_KEY }}
-          script: |
-            echo "Starting backup on VPS at $(date)"
+      - name: Install rsync and ssh-agent
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rsync openssh-client
 
-            # Create backup folders
-            mkdir -p /opt/vps-backup/db /opt/vps-backup/data
+      - name: Set up SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ env.VPS_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H "$VPS_HOST" >> ~/.ssh/known_hosts
 
-            # Dump MySQL database using dedicated user
+      - name: Create MySQL dump on VPS
+        run: |
+          ssh -i ~/.ssh/id_rsa ${VPS_USER}@${VPS_HOST} '
+            mkdir -p /opt/vps-backup/db
             mysqldump -u $MYSQL_USER -p"$MYSQL_PASSWORD" panel > /opt/vps-backup/db/panel.sql
+          '
 
-            # Backup tailscale state
-            sudo cp /var/lib/tailscale/tailscaled.state /opt/vps-backup/data/ || echo "No tailscale state found"
+      - name: Rsync remote data to GitHub runner
+        run: |
+          mkdir -p ./vps-backup
+          rsync -avz -e "ssh -i ~/.ssh/id_rsa" \
+            ${VPS_USER}@${VPS_HOST}:/opt/vps-backup/ ./vps-backup/
 
-            # Zip backup folder
-            zip -r /home/${VPS_USER}/latest-backup.zip /opt/vps-backup
-
-            echo "Backup completed at $(date)"
-
-      - name: Download backup zip from VPS
-        uses: appleboy/scp-action@v0.1.5
-        with:
-          host: ${{ env.VPS_HOST }}
-          username: ${{ env.VPS_USER }}
-          key: ${{ env.VPS_SSH_KEY }}
-          source: /home/${{ env.VPS_USER }}/latest-backup.zip
-          target: ./latest-backup.zip
+      - name: Compress backup
+        run: |
+          zip -r vps-backup.zip ./vps-backup
 
       - name: Upload backup artifact
         uses: actions/upload-artifact@v4
         with:
-          name: vps-backup
-          path: latest-backup.zip
+          name: vps-rsync-backup
+          path: vps-backup.zip
