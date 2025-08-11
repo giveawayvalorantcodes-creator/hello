@@ -35,23 +35,12 @@ jobs:
 
       - name: Create MySQL dump on VPS
         run: |
-          ssh -i ~/.ssh/id_rsa ${VPS_USER}@${VPS_HOST} '
+          ssh -i ~/.ssh/id_rsa ${VPS_USER}@${VPS_HOST} "
             mkdir -p /opt/vps-backup/db
-            mysqldump -u $MYSQL_USER -p"$MYSQL_PASSWORD" panel > /opt/vps-backup/db/panel.sql
-          '
+            mysqldump -u $MYSQL_USER -p\"$MYSQL_PASSWORD\" panel > /opt/vps-backup/db/panel.sql
+          "
 
       - name: Rsync remote data to GitHub runner
         run: |
           mkdir -p ./vps-backup
           rsync -avz -e "ssh -i ~/.ssh/id_rsa" \
-            ${VPS_USER}@${VPS_HOST}:/opt/vps-backup/ ./vps-backup/
-
-      - name: Compress backup
-        run: |
-          zip -r vps-backup.zip ./vps-backup
-
-      - name: Upload backup artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: vps-rsync-backup
-          path: vps-backup.zip
