@@ -1,89 +1,59 @@
-name: Persistent VPS with Pterodactyl & Tailscale
+name: Persistent VPS Backup and Restore
 
 on:
   schedule:
-    - cron: '0 */6 * * *'  # Every 6 hours
+    - cron: '*/15 * * * *'   # Every 15 minutes
   workflow_dispatch:
 
 jobs:
-  vps-session:
+  backup-restore:
     runs-on: ubuntu-latest
-    timeout-minutes: 20  # Shortened for testing
+    timeout-minutes: 20
+
+    env:
+      VPS_HOST: ${{ secrets.VPS_HOST }}
+      VPS_USER: biralo
+      VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+      MYSQL_USER: ptero_user
+      MYSQL_PASSWORD: ${{ secrets.PTERO_DB_PASSWORD }}
 
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Set hostname to biralo
-        run: sudo hostnamectl set-hostname biralo
-
-      - name: Download previous backup (if any)
-        uses: actions/download-artifact@v4
+      - name: Backup on VPS via SSH
+        uses: appleboy/ssh-action@v0.1.7
         with:
-          name: vps-backup
-          path: ./backup
-        continue-on-error: true
+          host: ${{ env.VPS_HOST }}
+          username: ${{ env.VPS_USER }}
+          key: ${{ env.VPS_SSH_KEY }}
+          script: |
+            echo "Starting backup on VPS at $(date)"
 
-      - name: Install packages
-        run: |
-          sudo apt update
-          sudo apt install -y curl unzip sudo net-tools neofetch mariadb-client zip
+            # Create backup folders
+            mkdir -p /opt/vps-backup/db /opt/vps-backup/data
 
-      - name: Install Tailscale
-        run: |
-          curl -fsSL https://tailscale.com/install.sh | sh
+            # Dump MySQL database using dedicated user
+            mysqldump -u $MYSQL_USER -p"$MYSQL_PASSWORD" panel > /opt/vps-backup/db/panel.sql
 
-      - name: Restore backup (files + database + Tailscale state)
-        run: |
-          if [ -f ./backup/latest-backup.zip ]; then
-            echo "📦 Extracting backup..."
-            unzip -o ./backup/latest-backup.zip -d /
-            if [ -f /opt/vps-backup/data/tailscaled.state ]; then
-              sudo mkdir -p /var/lib/tailscale
-              sudo cp /opt/vps-backup/data/tailscaled.state /var/lib/tailscale/tailscaled.state
-              sudo chmod 600 /var/lib/tailscale/tailscaled.state
-            fi
-            if [ -f /opt/vps-backup/db/panel.sql ]; then
-              mysql -u root -p"${{ secrets.MYSQL_ROOT_PASSWORD }}" panel < /opt/vps-backup/db/panel.sql
-            fi
-          else
-            echo "🆕 No backup found, starting fresh"
-          fi
+            # Backup tailscale state
+            sudo cp /var/lib/tailscale/tailscaled.state /opt/vps-backup/data/ || echo "No tailscale state found"
 
-      - name: Start Tailscale
-        run: |
-          sudo tailscaled &
-          sleep 8
-          sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname=biralo || echo "Tailscale already up"
+            # Zip backup folder
+            zip -r /home/${VPS_USER}/latest-backup.zip /opt/vps-backup
 
-      - name: Create biralo user (sudo) safely
-        run: |
-          if ! id -u biralo >/dev/null 2>&1; then
-            sudo useradd -m -s /bin/bash biralo
-            if [ -n "${{ secrets.BIRALO_PASSWORD }}" ]; then
-              echo "biralo:${{ secrets.BIRALO_PASSWORD }}" | sudo chpasswd
-            else
-              echo "⚠️ BIRALO_PASSWORD secret not set — skipping password setup."
-            fi
-            sudo usermod -aG sudo biralo
-            echo "biralo ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/biralo
-          fi
+            echo "Backup completed at $(date)"
 
-      - name: Auto backup loop (every 1 minute for testing)
-        run: |
-          mkdir -p /opt/vps-backup/db /opt/vps-backup/data
-          echo "🔁 Starting test backups every 1 minute"
-          for i in {1..5}; do
-            echo "🕒 Backup $i at $(date)"
-            mysqldump -u root -p"${{ secrets.MYSQL_ROOT_PASSWORD }}" panel > /opt/vps-backup/db/panel.sql
-            sudo cp /var/lib/tailscale/tailscaled.state /opt/vps-backup/data/
-            sudo chown -R $USER:$USER /opt/vps-backup
-            zip -r -q latest-backup.zip /opt/vps-backup
-            echo "✅ Backup $i completed at $(date)"
-            sleep 60
-          done
+      - name: Download backup zip from VPS
+        uses: appleboy/scp-action@v0.1.5
+        with:
+          host: ${{ env.VPS_HOST }}
+          username: ${{ env.VPS_USER }}
+          key: ${{ env.VPS_SSH_KEY }}
+          source: /home/${{ env.VPS_USER }}/latest-backup.zip
+          target: ./latest-backup.zip
 
-      - name: Upload final backup
+      - name: Upload backup artifact
         uses: actions/upload-artifact@v4
         with:
           name: vps-backup
