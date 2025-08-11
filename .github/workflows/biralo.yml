@@ -6,15 +6,15 @@ on:
   workflow_dispatch:
 
 jobs:
-  vps:
+  vps-session:
     runs-on: ubuntu-latest
-    timeout-minutes: 350  # Just under 6 hours
+    timeout-minutes: 20  # Shortened for testing
 
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Set hostname
+      - name: Set hostname to biralo
         run: sudo hostnamectl set-hostname biralo
 
       - name: Download previous backup (if any)
@@ -24,32 +24,30 @@ jobs:
           path: ./backup
         continue-on-error: true
 
-      - name: Install dependencies
+      - name: Install packages
         run: |
           sudo apt update
-          sudo apt install -y tmate curl unzip sudo net-tools neofetch zip mysql-client
+          sudo apt install -y curl unzip sudo net-tools neofetch mariadb-client zip
 
       - name: Install Tailscale
-        run: curl -fsSL https://tailscale.com/install.sh | sh
-
-      - name: Restore backup files
         run: |
-          if [ -f ./backup/backup.zip ]; then
-            unzip -o ./backup/backup.zip -d /
-            echo "✅ Backup restored"
-          else
-            echo "📭 No backup found"
-          fi
+          curl -fsSL https://tailscale.com/install.sh | sh
 
-      - name: Restore Tailscale state
+      - name: Restore backup (files + database + Tailscale state)
         run: |
-          if [ -f /opt/vps-backup/data/tailscaled.state ]; then
-            sudo mkdir -p /var/lib/tailscale
-            sudo cp /opt/vps-backup/data/tailscaled.state /var/lib/tailscale/
-            sudo chmod 600 /var/lib/tailscale/tailscaled.state
-            echo "✅ Tailscale state restored"
+          if [ -f ./backup/latest-backup.zip ]; then
+            echo "📦 Extracting backup..."
+            unzip -o ./backup/latest-backup.zip -d /
+            if [ -f /opt/vps-backup/data/tailscaled.state ]; then
+              sudo mkdir -p /var/lib/tailscale
+              sudo cp /opt/vps-backup/data/tailscaled.state /var/lib/tailscale/tailscaled.state
+              sudo chmod 600 /var/lib/tailscale/tailscaled.state
+            fi
+            if [ -f /opt/vps-backup/db/panel.sql ]; then
+              mysql -u root -p"${{ secrets.MYSQL_ROOT_PASSWORD }}" panel < /opt/vps-backup/db/panel.sql
+            fi
           else
-            echo "⚠️ No Tailscale state found"
+            echo "🆕 No backup found, starting fresh"
           fi
 
       - name: Start Tailscale
@@ -58,98 +56,31 @@ jobs:
           sleep 8
           sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname=biralo || echo "Tailscale already up"
 
-      - name: Restore Pterodactyl panel files
-        run: |
-          if [ -d /opt/vps-backup/panel/pterodactyl ]; then
-            sudo cp -r /opt/vps-backup/panel/pterodactyl /var/www/
-            echo "✅ Panel files restored"
-          else
-            echo "⚠️ No panel files found"
-          fi
-
-      - name: Restore Pterodactyl database
-        env:
-          MYSQL_PWD: ${{ secrets.MYSQL_ROOT_PASSWORD }}
-        run: |
-          if [ -f /opt/vps-backup/db/panel.sql ]; then
-            sudo systemctl start mysql || true
-            mysql -u root panel < /opt/vps-backup/db/panel.sql
-            echo "✅ Database restored"
-          else
-            echo "⚠️ No database backup found"
-          fi
-
-      - name: Create user biralo
+      - name: Create biralo user (sudo)
         run: |
           if ! id -u biralo >/dev/null 2>&1; then
             sudo useradd -m -s /bin/bash biralo
-            echo "biralo:${{ secrets.BIRALO_PASSWORD }}" | sudo chpasswd
+            echo "${{ secrets.BIRALO_PASSWORD }}" | sudo chpasswd
             sudo usermod -aG sudo biralo
             echo "biralo ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/biralo
           fi
 
-      - name: Start tmate SSH session
-        uses: mxschmitt/action-tmate@v3
-
-      - name: Show IP + SSH info
+      - name: Auto backup loop (every 1 minute for testing)
         run: |
-          echo "🌐 Tailscale IP:"
-          tailscale ip -4 || echo "IP not available"
-          echo ""
-          echo "🔑 tmate SSH session:"
-          cat $HOME/.tmate.sock/ssh || echo "No tmate socket"
-
-      - name: Auto backup loop (every hour)
-        run: |
-          echo "⏳ Starting hourly backup loop..."
-          (
-            for i in {1..5}; do
-              echo "🕒 Hourly backup $i"
-              sudo mkdir -p /opt/vps-backup/data /opt/vps-backup/panel /opt/vps-backup/db
-
-              # Backup Tailscale state
-              sudo cp /var/lib/tailscale/tailscaled.state /opt/vps-backup/data/
-
-              # Backup panel files
-              sudo cp -r /var/www/pterodactyl /opt/vps-backup/panel/
-
-              # Backup MySQL database
-              mysqldump -u root panel > /opt/vps-backup/db/panel.sql
-
-              sudo chown -R $(whoami):$(whoami) /opt/vps-backup
-
-              zip -r "auto-backup-$i.zip" /opt/vps-backup
-              cp "auto-backup-$i.zip" latest-backup.zip
-
-              echo "✅ Hourly backup $i done"
-              sleep 3600
-            done
-          ) &
-
-          echo "🛌 Sleeping for 6 hours..."
-          sleep 21600
-
-      - name: Final backup before exit
-        run: |
-          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-          sudo mkdir -p /opt/vps-backup/data /opt/vps-backup/panel /opt/vps-backup/db
-
-          sudo cp /var/lib/tailscale/tailscaled.state /opt/vps-backup/data/
-          sudo cp -r /var/www/pterodactyl /opt/vps-backup/panel/
-          mysqldump -u root panel > /opt/vps-backup/db/panel.sql
-
-          sudo chown -R $(whoami):$(whoami) /opt/vps-backup
-
-          zip -r "backup-${TIMESTAMP}.zip" /opt/vps-backup
-          cp "backup-${TIMESTAMP}.zip" latest-backup.zip
-          echo "BACKUP_NAME=backup-${TIMESTAMP}.zip" >> $GITHUB_ENV
+          mkdir -p /opt/vps-backup/db /opt/vps-backup/data
+          echo "🔁 Starting test backups every 1 minute"
+          for i in {1..5}; do
+            echo "🕒 Backup $i at $(date)"
+            mysqldump -u root -p"${{ secrets.MYSQL_ROOT_PASSWORD }}" panel > /opt/vps-backup/db/panel.sql
+            sudo cp /var/lib/tailscale/tailscaled.state /opt/vps-backup/data/
+            sudo chown -R $USER:$USER /opt/vps-backup
+            zip -r -q latest-backup.zip /opt/vps-backup
+            echo "✅ Backup $i completed at $(date)"
+            sleep 60
+          done
 
       - name: Upload final backup
         uses: actions/upload-artifact@v4
         with:
           name: vps-backup
           path: latest-backup.zip
-
-      - name: Cleanup
-        run: |
-          rm -rf /opt/vps-backup *.zip ./backup
