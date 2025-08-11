@@ -1,46 +1,96 @@
-name: Persistent VPS Rsync Backup
+name: Continuous Persistent VPS
 
 on:
   schedule:
-    - cron: '*/15 * * * *'  # Every 15 minutes
+    # Run every 10 minutes for testing; later change to hourly or 6 hours
+    - cron: '*/10 * * * *'
   workflow_dispatch:
 
 jobs:
-  rsync-backup:
+  vps-session:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-
-    env:
-      VPS_HOST: ${{ secrets.VPS_HOST }}
-      VPS_USER: biralo
-      VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
-      MYSQL_USER: ptero_user
-      MYSQL_PASSWORD: ${{ secrets.PTERO_DB_PASSWORD }}
+    timeout-minutes: 350
 
     steps:
-      - name: Checkout repository
+      - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Install rsync and ssh-agent
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y rsync openssh-client
+      - name: Set hostname to biralo
+        run: sudo hostnamectl set-hostname biralo
 
-      - name: Set up SSH key
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ env.VPS_SSH_KEY }}" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
-          ssh-keyscan -H "$VPS_HOST" >> ~/.ssh/known_hosts
+      - name: Download VPS backup (if any)
+        uses: actions/download-artifact@v4
+        with:
+          name: vps-backup
+          path: ./backup
+        continue-on-error: true
 
-      - name: Create MySQL dump on VPS
+      - name: Install prerequisites
         run: |
-          ssh -i ~/.ssh/id_rsa ${VPS_USER}@${VPS_HOST} "
-            mkdir -p /opt/vps-backup/db
-            mysqldump -u $MYSQL_USER -p\"$MYSQL_PASSWORD\" panel > /opt/vps-backup/db/panel.sql
-          "
+          sudo apt update
+          sudo apt install -y tmate curl unzip sudo net-tools neofetch zip
 
-      - name: Rsync remote data to GitHub runner
+      - name: Install Tailscale official script
         run: |
-          mkdir -p ./vps-backup
-          rsync -avz -e "ssh -i ~/.ssh/id_rsa" \
+          curl -fsSL https://tailscale.com/install.sh | sh
+
+      - name: Restore backup files (including Petrodactyl)
+        run: |
+          if [ -f ./backup/backup.zip ]; then
+            echo "Restoring backup files..."
+            unzip -o ./backup/backup.zip -d /
+          else
+            echo "No backup found, starting fresh"
+          fi
+
+      - name: Restore Tailscale state
+        run: |
+          if [ -f /opt/vps-backup/data/tailscaled.state ]; then
+            sudo mkdir -p /var/lib/tailscale
+            sudo cp /opt/vps-backup/data/tailscaled.state /var/lib/tailscale/tailscaled.state
+            sudo chmod 600 /var/lib/tailscale/tailscaled.state
+          fi
+
+      - name: Start Tailscale daemon and connect
+        run: |
+          sudo tailscaled &
+          sleep 8
+          sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname=biralo || echo "Tailscale already up"
+
+      - name: Create user biralo with sudo if not exists
+        run: |
+          if ! id -u biralo >/dev/null 2>&1; then
+            sudo useradd -m -s /bin/bash biralo
+            echo "biralo:biralo" | sudo chpasswd
+            sudo usermod -aG sudo biralo
+            echo "biralo ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/biralo
+          fi
+
+      - name: Start tmate session for SSH access
+        uses: mxschmitt/action-tmate@v3
+
+      - name: Show Tailscale IP and tmate info
+        run: |
+          echo "🔗 Tailscale IP:"
+          tailscale ip -4 || echo "Tailscale IP not found"
+          echo ""
+          echo "🔑 tmate SSH session:"
+          cat $HOME/.tmate.sock/ssh
+
+      - name: Sleep to keep VPS alive
+        run: sleep 600  # 10 minutes for testing (change to 3600 later)
+
+      - name: Backup VPS data and Tailscale state, including Petrodactyl files
+        run: |
+          sudo mkdir -p /opt/vps-backup/data
+          sudo cp /var/lib/tailscale/tailscaled.state /opt/vps-backup/data/ || echo "No tailscaled.state found"
+          mkdir -p /opt/vps-backup/petrodactyl
+          cp -r /home/biralo/petrodactyl/* /opt/vps-backup/petrodactyl/ || echo "No Petrodactyl files found"
+          sudo chown -R $USER:$USER /opt/vps-backup
+          zip -r backup.zip /opt/vps-backup
+
+      - name: Upload VPS backup artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vps-backup
+          path: backup.zip
