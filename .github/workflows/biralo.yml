@@ -1,55 +1,85 @@
-name: Pterodactyl Full Node Backup & Restore
+name: Continuous Persistent VPS with Pterodactyl Node Backup
 
 on:
   schedule:
-    - cron: '*/30 * * * *'  # Every 30 minutes
+    - cron: '*/20 * * * *'  # Every 20 minutes
   workflow_dispatch:
 
 jobs:
-  backup_and_restore:
+  vps-session:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 350  # Just under 6 hours
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Restore previous backup (if exists)
-        uses: actions/download-artifact@v4
-        with:
-          name: pterodactyl-node-full
-          path: ./restore
-        continue-on-error: true
-
-      - name: Unzip and restore
-        if: success() && steps.download-artifact.outcome == 'success'
-        run: |
-          sudo cp -r ./restore/* /
-          echo "Restored previous backup into place."
-
-      - name: Update system packages
-        run: |
-          sudo apt update && sudo apt upgrade -y
+      - name: Set hostname to biralo
+        run: sudo hostnamectl set-hostname biralo
 
       - name: Install prerequisites
         run: |
-          sudo apt install -y zip unzip sudo
+          sudo apt update && sudo apt upgrade -y
+          sudo apt install -y curl unzip sudo net-tools neofetch zip python3-pip
+          pip3 install linode-object-upload
 
-      - name: Full Pterodactyl Wings Node Backup
+      - name: Install Tailscale
         run: |
-          sudo mkdir -p /opt/pterodactyl-backup-full
-          sudo cp /etc/pterodactyl/config.yml /opt/pterodactyl-backup-full/ || true
-          sudo cp -r /var/lib/pterodactyl /opt/pterodactyl-backup-full/ || true
-          sudo cp -r /var/log/pterodactyl /opt/pterodactyl-backup-full/ || true
-          sudo cp -r /tmp/pterodactyl /opt/pterodactyl-backup-full/ || true
+          curl -fsSL https://tailscale.com/install.sh | sh
 
-      - name: Archive configuration
+      - name: Restore backup files
         run: |
-          cd /opt
-          zip -r pterodactyl-node-full.zip pterodactyl-backup-full
+          if [ -f ./backup/backup.zip ]; then
+            unzip -o ./backup/backup.zip -d /
+          else
+            echo "No backup found, starting fresh"
+          fi
 
-      - name: Upload full backup artifact
+      - name: Restore Tailscale state
+        run: |
+          if [ -f /opt/vps-backup/data/tailscaled.state ]; then
+            sudo mkdir -p /var/lib/tailscale
+            sudo cp /opt/vps-backup/data/tailscaled.state /var/lib/tailscale/tailscaled.state
+            sudo chmod 600 /var/lib/tailscale/tailscaled.state
+          fi
+
+      - name: Start Tailscale
+        run: |
+          sudo tailscaled &
+          sleep 8
+          sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname=biralo
+
+      - name: Create user biralo with sudo
+        run: |
+          if ! id -u biralo >/dev/null 2>&1; then
+            sudo useradd -m -s /bin/bash biralo
+            echo "biralo:biralo" | sudo chpasswd
+            sudo usermod -aG sudo biralo
+            echo "biralo ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/biralo
+          fi
+
+      - name: Backup Pterodactyl node data
+        run: |
+          BACKUP_DIR="/var/lib/pterodactyl/backups"
+          BACKUP_FILE="pterodactyl-backup-$(date +'%Y-%m-%d_%H-%M-%S').tar.gz"
+          tar -czvf $BACKUP_FILE $BACKUP_DIR
+          mv $BACKUP_FILE ./backup/
+          echo "Backup saved to ./backup/$BACKUP_FILE"
+
+      - name: Backup VPS data and Tailscale state
+        run: |
+          sudo mkdir -p /opt/vps-backup/data
+          sudo cp /var/lib/tailscale/tailscaled.state /opt/vps-backup/data/
+          sudo chown -R $USER:$USER /opt/vps-backup
+          zip -r backup.zip /opt/vps-backup
+          mv backup.zip ./backup/
+          echo "Backup saved to ./backup/backup.zip"
+
+      - name: Upload backups as artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: pterodactyl-node-full
-          path: /opt/pterodactyl-node-full.zip
+          name: vps-backup
+          path: ./backup/
+
+      - name: Sleep to keep VPS alive
+        run: sleep 21600  # 6 hours
