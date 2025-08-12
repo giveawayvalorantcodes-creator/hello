@@ -72,9 +72,6 @@ jobs:
           echo "🔗 Tailscale IP:"
           tailscale ip -4 || echo "Tailscale IP not found"
 
-      - name: Sleep to keep VPS alive for 20 minutes before backup
-        run: sleep 1200  # 20 minutes
-
       - name: Backup VPS data and tailscale state
         run: |
           sudo mkdir -p /opt/vps-backup/data
