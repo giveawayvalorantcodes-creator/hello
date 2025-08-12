@@ -1,96 +1,55 @@
-name: Auto VPS Backup & Restore Every 5 Minutes
+name: Pterodactyl Full Node Backup & Restore
 
 on:
   schedule:
-    - cron: '*/5 * * * *'  # Every 5 minutes
+    - cron: '*/30 * * * *'  # Every 30 minutes
   workflow_dispatch:
 
 jobs:
-  vps-persistent:
+  backup_and_restore:
     runs-on: ubuntu-latest
-    timeout-minutes: 10  # Runs frequently, short timeout
+    timeout-minutes: 60
 
     steps:
-      - name: Checkout repo
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set static hostname
-        run: sudo hostnamectl set-hostname biralo
-
-      - name: Download backup artifact if it exists
+      - name: Restore previous backup (if exists)
         uses: actions/download-artifact@v4
         with:
-          name: vps-backup
-          path: ./backup
+          name: pterodactyl-node-full
+          path: ./restore
         continue-on-error: true
 
-      - name: Install required packages
+      - name: Unzip and restore
+        if: success() && steps.download-artifact.outcome == 'success'
         run: |
-          sudo apt update
-          sudo apt install -y unzip curl sudo zip
+          sudo cp -r ./restore/* /
+          echo "Restored previous backup into place."
 
-      - name: Install Tailscale
-        run: curl -fsSL https://tailscale.com/install.sh | sh
-
-      - name: Restore previous backup files (Petrodactyl, tailscale, etc.)
+      - name: Update system packages
         run: |
-          if [ -f ./backup/backup.zip ]; then
-            unzip -o ./backup/backup.zip -d /
-          else
-            echo "No backup found. Starting fresh."
-          fi
+          sudo apt update && sudo apt upgrade -y
 
-      - name: Restore Tailscale state
+      - name: Install prerequisites
         run: |
-          if [ -f /opt/vps-backup/data/tailscaled.state ]; then
-            sudo mkdir -p /var/lib/tailscale
-            sudo cp /opt/vps-backup/data/tailscaled.state /var/lib/tailscale/tailscaled.state
-            sudo chmod 600 /var/lib/tailscale/tailscaled.state
-          fi
+          sudo apt install -y zip unzip sudo
 
-      - name: Start Tailscale with same IP
+      - name: Full Pterodactyl Wings Node Backup
         run: |
-          sudo tailscaled &
-          sleep 8
-          sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname=biralo || echo "Tailscale already up"
+          sudo mkdir -p /opt/pterodactyl-backup-full
+          sudo cp /etc/pterodactyl/config.yml /opt/pterodactyl-backup-full/ || true
+          sudo cp -r /var/lib/pterodactyl /opt/pterodactyl-backup-full/ || true
+          sudo cp -r /var/log/pterodactyl /opt/pterodactyl-backup-full/ || true
+          sudo cp -r /tmp/pterodactyl /opt/pterodactyl-backup-full/ || true
 
-      - name: Ensure 'biralo' user exists with sudo access
+      - name: Archive configuration
         run: |
-          if ! id -u biralo >/dev/null 2>&1; then
-            sudo useradd -m -s /bin/bash biralo
-            echo "biralo:biralo" | sudo chpasswd
-            sudo usermod -aG sudo biralo
-            echo "biralo ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/biralo
-          fi
+          cd /opt
+          zip -r pterodactyl-node-full.zip pterodactyl-backup-full
 
-      - name: Display Tailscale IP
-        run: tailscale ip -4 || echo "No Tailscale IP available"
-
-      - name: Backup VPS (Petrodactyl + Tailscale state)
-        run: |
-          sudo mkdir -p /opt/vps-backup/data
-          
-          # Backup Tailscale state
-          sudo cp /var/lib/tailscale/tailscaled.state /opt/vps-backup/data/ || echo "No tailscaled.state found"
-
-          # Backup Petrodactyl panel
-          PETRO_PATH="/home/biralo/petrodactyl"  # Change if your path is different
-          if [ -d "$PETRO_PATH" ]; then
-            mkdir -p /opt/vps-backup/petrodactyl
-            cp -r "$PETRO_PATH"/* /opt/vps-backup/petrodactyl/
-          else
-            echo "Petrodactyl path not found at $PETRO_PATH"
-          fi
-
-          # You can add more folders if needed:
-          # cp -r /etc /opt/vps-backup/etc/
-          # cp -r /var/www /opt/vps-backup/var-www/
-
-          sudo chown -R $USER:$USER /opt/vps-backup
-          zip -r backup.zip /opt/vps-backup
-
-      - name: Upload backup for next run
+      - name: Upload full backup artifact
         uses: actions/upload-artifact@v4
         with:
-          name: vps-backup
-          path: backup.zip
+          name: pterodactyl-node-full
+          path: /opt/pterodactyl-node-full.zip
