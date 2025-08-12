@@ -1,9 +1,9 @@
-name: Continuous Persistent VPS with Pterodactyl Node Backup
+name: Continuous Persistent VPS
 
 on:
   schedule:
     - cron: '*/20 * * * *'  # Every 20 minutes
-  workflow_dispatch:
+  workflow_dispatch:  # Manual trigger for restoration
 
 jobs:
   vps-session:
@@ -17,13 +17,19 @@ jobs:
       - name: Set hostname to biralo
         run: sudo hostnamectl set-hostname biralo
 
+      - name: Download previous backup (if any)
+        uses: actions/download-artifact@v4
+        with:
+          name: vps-backup
+          path: ./backup
+        continue-on-error: true
+
       - name: Install prerequisites
         run: |
-          sudo apt update && sudo apt upgrade -y
-          sudo apt install -y curl unzip sudo net-tools neofetch zip python3-pip
-          pip3 install linode-object-upload
+          sudo apt update
+          sudo apt install -y tmate curl unzip sudo net-tools neofetch
 
-      - name: Install Tailscale
+      - name: Install Tailscale official script
         run: |
           curl -fsSL https://tailscale.com/install.sh | sh
 
@@ -47,7 +53,7 @@ jobs:
         run: |
           sudo tailscaled &
           sleep 8
-          sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname=biralo
+          sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname=biralo || echo "Tailscale already up"
 
       - name: Create user biralo with sudo
         run: |
@@ -58,28 +64,29 @@ jobs:
             echo "biralo ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/biralo
           fi
 
-      - name: Backup Pterodactyl node data
-        run: |
-          BACKUP_DIR="/var/lib/pterodactyl/backups"
-          BACKUP_FILE="pterodactyl-backup-$(date +'%Y-%m-%d_%H-%M-%S').tar.gz"
-          tar -czvf $BACKUP_FILE $BACKUP_DIR
-          mv $BACKUP_FILE ./backup/
-          echo "Backup saved to ./backup/$BACKUP_FILE"
+      - name: Start tmate session for SSH access
+        uses: mxschmitt/action-tmate@v3
 
-      - name: Backup VPS data and Tailscale state
+      - name: Show Tailscale IP and tmate info
+        run: |
+          echo "🔗 Tailscale IP:"
+          tailscale ip -4 || echo "Tailscale IP not found"
+          echo ""
+          echo "🔑 tmate SSH session:"
+          cat $HOME/.tmate.sock/ssh
+
+      - name: Sleep to keep VPS alive
+        run: sleep 21600  # 6 hours
+
+      - name: Backup VPS data and tailscale state
         run: |
           sudo mkdir -p /opt/vps-backup/data
           sudo cp /var/lib/tailscale/tailscaled.state /opt/vps-backup/data/
           sudo chown -R $USER:$USER /opt/vps-backup
           zip -r backup.zip /opt/vps-backup
-          mv backup.zip ./backup/
-          echo "Backup saved to ./backup/backup.zip"
 
-      - name: Upload backups as artifacts
+      - name: Upload VPS backup artifact
         uses: actions/upload-artifact@v4
         with:
           name: vps-backup
-          path: ./backup/
-
-      - name: Sleep to keep VPS alive
-        run: sleep 21600  # 6 hours
+          path: backup.zip
