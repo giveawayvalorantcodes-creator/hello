@@ -2,16 +2,19 @@ name: Continuous Persistent VPS
 
 on:
   schedule:
-    - cron: '*/20 * * * *'  # Every 20 minutes
-  workflow_dispatch:  # Manual trigger for restoration
+    - cron: '0 */6 * * *'  # Every 6 hours
+  workflow_dispatch:
 
 jobs:
   vps-session:
     runs-on: ubuntu-latest
-    timeout-minutes: 350  # Just under 6 hours
+    timeout-minutes: 350
+
+    env:
+      PTERO_NODE_PATH: /srv/pterodactyl  # ← Set your actual node path here
 
     steps:
-      - name: Checkout repository
+      - name: Checkout repo
         uses: actions/checkout@v4
 
       - name: Set hostname to biralo
@@ -20,32 +23,32 @@ jobs:
       - name: Download previous backup (if any)
         uses: actions/download-artifact@v4
         with:
-          name: vps-backup
+          name: ptero-node-backup
           path: ./backup
         continue-on-error: true
 
       - name: Install prerequisites
         run: |
           sudo apt update
-          sudo apt install -y tmate curl unzip sudo net-tools neofetch
+          sudo apt install -y curl unzip sudo net-tools neofetch rsync
 
-      - name: Install Tailscale official script
-        run: |
-          curl -fsSL https://tailscale.com/install.sh | sh
+      - name: Install Tailscale
+        run: curl -fsSL https://tailscale.com/install.sh | sh
 
-      - name: Restore backup files
+      - name: Restore Pterodactyl node configuration (if backup exists)
         run: |
-          if [ -f ./backup/backup.zip ]; then
-            unzip -o ./backup/backup.zip -d /
+          if [ -f ./backup/ptero-node-backup.tar.gz ]; then
+            echo "🔁 Restoring Pterodactyl node from backup..."
+            sudo tar -xzf ./backup/ptero-node-backup.tar.gz -C /
           else
-            echo "No backup found, starting fresh"
+            echo "⚠️ No Pterodactyl node backup found. Starting fresh."
           fi
 
       - name: Restore Tailscale state
         run: |
-          if [ -f /opt/vps-backup/data/tailscaled.state ]; then
+          if [ -f /opt/ptero-backup/tailscaled.state ]; then
             sudo mkdir -p /var/lib/tailscale
-            sudo cp /opt/vps-backup/data/tailscaled.state /var/lib/tailscale/tailscaled.state
+            sudo cp /opt/ptero-backup/tailscaled.state /var/lib/tailscale/tailscaled.state
             sudo chmod 600 /var/lib/tailscale/tailscaled.state
           fi
 
@@ -64,23 +67,32 @@ jobs:
             echo "biralo ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/biralo
           fi
 
-      - name: Start tmate session for SSH access
-        uses: mxschmitt/action-tmate@v3
-
       - name: Show Tailscale IP
         run: |
           echo "🔗 Tailscale IP:"
           tailscale ip -4 || echo "Tailscale IP not found"
 
-      - name: Backup VPS data and tailscale state
-        run: |
-          sudo mkdir -p /opt/vps-backup/data
-          sudo cp /var/lib/tailscale/tailscaled.state /opt/vps-backup/data/
-          sudo chown -R $USER:$USER /opt/vps-backup
-          zip -r backup.zip /opt/vps-backup
+      - name: Sleep to keep VPS alive
+        run: sleep 21600  # 6 hours
 
-      - name: Upload VPS backup artifact
+      - name: Backup Pterodactyl node configuration
+        run: |
+          echo "📦 Backing up Pterodactyl node..."
+          sudo mkdir -p /opt/ptero-backup
+          sudo cp /var/lib/tailscale/tailscaled.state /opt/ptero-backup/ || true
+
+          if [ -d "$PTERO_NODE_PATH" ]; then
+            sudo mkdir -p /opt/ptero-backup$PTERO_NODE_PATH
+            sudo rsync -a $PTERO_NODE_PATH/ /opt/ptero-backup$PTERO_NODE_PATH/
+          else
+            echo "⚠️ $PTERO_NODE_PATH not found. Nothing to back up."
+          fi
+
+          sudo chown -R $USER:$USER /opt/ptero-backup
+          tar -czf ptero-node-backup.tar.gz -C / opt/ptero-backup
+
+      - name: Upload Pterodactyl backup
         uses: actions/upload-artifact@v4
         with:
-          name: vps-backup
-          path: backup.zip
+          name: ptero-node-backup
+          path: ptero-node-backup.tar.gz
